@@ -1,0 +1,40 @@
+name: Build for macOS 12
+
+# Builds a universal Tetherbug.app with a macOS 12 deployment target and uploads it as an artifact.
+on:
+  push:
+    branches: [macos12]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Universal, so the build's render-icon step runs natively on the arm64 runner.
+      - name: Build universal Tetherbug.app
+        run: macos/build.sh out 0.1.0-macos12 arm64 x86_64
+      - name: Check architectures and deployment target
+        run: |
+          binary=out/Tetherbug.app/Contents/MacOS/Tetherbug
+          lipo -archs "$binary"
+          lipo -archs "$binary" | grep -qw x86_64
+          otool -arch x86_64 -l "$binary" | grep -A4 LC_BUILD_VERSION
+          otool -arch x86_64 -l "$binary" | grep -A4 LC_BUILD_VERSION | grep -Eq 'minos 12\.0$'
+          plutil -extract LSMinimumSystemVersion raw out/Tetherbug.app/Contents/Info.plist
+      - name: Zip the app
+        run: ditto -c -k --keepParent out/Tetherbug.app Tetherbug-macos12.zip
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Tetherbug-macos12
+          path: Tetherbug-macos12.zip
+          if-no-files-found: error

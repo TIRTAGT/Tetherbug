@@ -13,7 +13,7 @@ shift $(($# < 2 ? $# : 2))
 archs=("${@:-$(uname -m)}")
 here=$(cd "$(dirname "$0")" && pwd)
 swiftc=${SWIFTC:-swiftc}
-min_macos=14.0
+min_macos=12.0
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT

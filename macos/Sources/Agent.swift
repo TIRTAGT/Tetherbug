@@ -306,8 +306,9 @@ final class ChannelScanner {
         case 2484: (number, band) = (14, .band2GHz)
         case 2412...2472: (number, band) = ((frequency - 2407) / 5, .band2GHz)
         case 5160...5885: (number, band) = ((frequency - 5000) / 5, .band5GHz)
-        case 5935: (number, band) = (2, .band6GHz)
-        case 5955...7115: (number, band) = ((frequency - 5950) / 5, .band6GHz)
+        // 6 GHz by raw value (kCWChannelBand6GHz), so it builds for macOS 12 whatever the case's availability.
+        case 5935: (number, band) = (2, CWChannelBand(rawValue: 3)!)
+        case 5955...7115: (number, band) = ((frequency - 5950) / 5, CWChannelBand(rawValue: 3)!)
         default: return nil
         }
         let supported = CWWiFiClient.shared().interface()?.supportedWLANChannels()?.first {

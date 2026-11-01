@@ -140,6 +140,78 @@ extension View {
     func keyboardNavigation(_ focus: KeyboardFocus) -> some View {
         modifier(KeyboardNavigation(focus: focus))
     }
+
+    /// `onChange(of:)` with the new value on every macOS version: the two-value form is macOS 14+, and
+    /// the `perform:` form it replaces is deprecated there.
+    @ViewBuilder func onChangeCompat<V: Equatable>(of value: V, perform action: @escaping (V) -> Void) -> some View {
+        if #available(macOS 14, *) {
+            onChange(of: value) { _, new in action(new) }
+        } else {
+            onChange(of: value, perform: action)
+        }
+    }
+
+    /// Key handling for macOS 12–13, which lack `onKeyPress`: `handle` sees the app's key-down events
+    /// while this view is on screen and returns true to swallow one.
+    func keyDownMonitor(_ handle: @escaping (NSEvent) -> Bool) -> some View {
+        modifier(KeyDownMonitor(handle: handle))
+    }
+}
+
+private final class KeyDownHandler {
+    var handle: (NSEvent) -> Bool = { _ in false }
+    var monitor: Any?
+}
+
+private struct KeyDownMonitor: ViewModifier {
+    let handle: (NSEvent) -> Bool
+    @State private var handler = KeyDownHandler()
+
+    func body(content: Content) -> some View {
+        // Refresh on every render, like KeyboardFocusable's action: the closure reads the current state.
+        handler.handle = handle
+        return content
+            .onAppear {
+                guard handler.monitor == nil else { return }
+                handler.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [handler] event in
+                    handler.handle(event) ? nil : event
+                }
+            }
+            .onDisappear {
+                if let monitor = handler.monitor { NSEvent.removeMonitor(monitor) }
+                handler.monitor = nil
+            }
+    }
+}
+
+extension Animation {
+    /// The switches' knob: `.snappy` on macOS 14+, the same small-bounce spring before it.
+    static var switchKnob: Animation {
+        if #available(macOS 14, *) { return .snappy(duration: 0.18) }
+        return .spring(response: 0.18, dampingFraction: 0.85)
+    }
+}
+
+/// A switch's sunken trough: an inner shadow down-right and a highlight along the top-left edge.
+private struct Trough: View {
+    let color: Color
+    let palette: Palette
+
+    var body: some View {
+        if #available(macOS 13, *) {
+            Capsule()
+                .fill(color
+                    .shadow(.inner(color: .black.opacity(0.45), radius: 4, x: 3, y: 3))
+                    .shadow(.inner(color: palette.highlight, radius: 1.5, x: -1, y: -1)))
+        } else {
+            // Inner shadows (macOS 13+) approximated: blurred rims, offset and clipped to the capsule.
+            Capsule()
+                .fill(color)
+                .overlay(Capsule().stroke(Color.black.opacity(0.45), lineWidth: 8).blur(radius: 4).offset(x: 3, y: 3))
+                .overlay(Capsule().stroke(palette.highlight, lineWidth: 3).blur(radius: 1.5).offset(x: -1, y: -1))
+                .clipShape(Capsule())
+        }
+    }
 }
 
 private struct KeyboardFocusable: ViewModifier {
@@ -158,7 +230,7 @@ private struct KeyboardFocusable: ViewModifier {
                 let frame = geometry.frame(in: .named(KeyboardNavigation.space))
                 Color.clear
                     .onAppear { focus.entries[id] = .init(frame: frame, action: action) }
-                    .onChange(of: frame) { _, frame in focus.entries[id] = .init(frame: frame, action: action) }
+                    .onChangeCompat(of: frame) { frame in focus.entries[id] = .init(frame: frame, action: action) }
             })
             .onDisappear {
                 focus.entries[id] = nil
@@ -181,32 +253,67 @@ private struct KeyboardNavigation: ViewModifier {
     @State private var lastMove = Date.distantPast
     @FocusState private var windowFocused: Bool
 
-    func body(content: Content) -> some View {
-        content
+    @ViewBuilder func body(content: Content) -> some View {
+        let base = content
             .coordinateSpace(name: Self.space)
             .environmentObject(focus)
-            .focusable()
-            .focusEffectDisabled()
-            .focused($windowFocused)
-            .onAppear { windowFocused = true }
-            // Hand key focus back to the window whenever the current item isn't a text field.
-            .onChange(of: focus.current) { _, current in
-                if current.flatMap({ focus.entries[$0]?.editsText }) != true { windowFocused = true }
-            }
-            // macOS delivers Shift-Tab as its own back-tab character (U+0019), not as Tab with Shift.
-            .onKeyPress(keys: [.tab, KeyEquivalent("\u{19}")], phases: [.down, .repeat]) { press in
-                // Holding Tab repeats at the system key-repeat rate; cap it so focus stays followable.
-                if press.phase == .repeat, Date().timeIntervalSince(lastMove) < Self.repeatInterval { return .handled }
-                lastMove = Date()
-                let back = press.key == KeyEquivalent("\u{19}") || press.modifiers.contains(.shift)
-                focus.move(by: back ? -1 : 1)
-                return .handled
-            }
-            .onKeyPress(keys: [.space, .return]) { _ in focus.activate() ? .handled : .ignored }
-            .onKeyPress(.escape) {
-                focus.current = nil
-                return .handled
-            }
+        if #available(macOS 14, *) {
+            base
+                .focusable()
+                .focusEffectDisabled()
+                .focused($windowFocused)
+                .onAppear { windowFocused = true }
+                // Hand key focus back to the window whenever the current item isn't a text field.
+                .onChange(of: focus.current) { _, current in
+                    if current.flatMap({ focus.entries[$0]?.editsText }) != true { windowFocused = true }
+                }
+                // macOS delivers Shift-Tab as its own back-tab character (U+0019), not as Tab with Shift.
+                .onKeyPress(keys: [.tab, KeyEquivalent("\u{19}")], phases: [.down, .repeat]) { press in
+                    // Holding Tab repeats at the system key-repeat rate; cap it so focus stays followable.
+                    if press.phase == .repeat, Date().timeIntervalSince(lastMove) < Self.repeatInterval { return .handled }
+                    lastMove = Date()
+                    let back = press.key == KeyEquivalent("\u{19}") || press.modifiers.contains(.shift)
+                    focus.move(by: back ? -1 : 1)
+                    return .handled
+                }
+                .onKeyPress(keys: [.space, .return]) { _ in focus.activate() ? .handled : .ignored }
+                .onKeyPress(.escape) {
+                    focus.current = nil
+                    return .handled
+                }
+        } else {
+            base
+                // Best effort: macOS 12–13 may give the first text field key focus as the window opens;
+                // start with nothing focused, as above.
+                .onAppear {
+                    DispatchQueue.main.async {
+                        NSApp.keyWindow?.makeFirstResponder(nil)
+                        focus.current = nil
+                    }
+                }
+                .keyDownMonitor(handleKeyDown)
+        }
+    }
+
+    /// macOS 12–13: the same keys from a key-down monitor. A text field being edited keeps its keys.
+    private func handleKeyDown(_ event: NSEvent) -> Bool {
+        guard event.modifierFlags.isDisjoint(with: [.command, .control, .option]),
+              !(NSApp.keyWindow?.firstResponder is NSText) else { return false }
+        let key = event.charactersIgnoringModifiers ?? ""
+        switch key {
+        case "\t", "\u{19}":
+            if event.isARepeat, Date().timeIntervalSince(lastMove) < Self.repeatInterval { return true }
+            lastMove = Date()
+            focus.move(by: key == "\u{19}" || event.modifierFlags.contains(.shift) ? -1 : 1)
+            return true
+        case " ", "\r":
+            return focus.activate()
+        case "\u{1b}":
+            focus.current = nil
+            return true
+        default:
+            return false
+        }
     }
 }
 
@@ -230,10 +337,7 @@ private struct SwitchRow: View {
             Button(action: toggle) {
                 ZStack(alignment: configuration.isOn ? .trailing : .leading) {
                     // Sunken trough; a brighter purple when on.
-                    Capsule()
-                        .fill((configuration.isOn ? palette.onTrack : palette.offTrack)
-                            .shadow(.inner(color: .black.opacity(0.45), radius: 4, x: 3, y: 3))
-                            .shadow(.inner(color: palette.highlight, radius: 1.5, x: -1, y: -1)))
+                    Trough(color: configuration.isOn ? palette.onTrack : palette.offTrack, palette: palette)
                         .frame(width: 46, height: 26)
                     // Raised purple knob with a pronounced light top-left rim and dark bottom-right edge.
                     Circle()
@@ -258,7 +362,7 @@ private struct SwitchRow: View {
 
     private func toggle() {
         guard enabled else { return }
-        withAnimation(.snappy(duration: 0.18)) { configuration.isOn.toggle() }
+        withAnimation(.switchKnob) { configuration.isOn.toggle() }
     }
 }
 
@@ -302,11 +406,22 @@ private struct TextButtonLabel: View {
     @State private var hovering = false
 
     var body: some View {
-        configuration.label
-            .foregroundStyle(palette.alt)
-            .underline(hovering)
+        underlinedLabel
             .opacity(configuration.isPressed ? 0.6 : 1)
             .onHover { hovering = $0 }
+    }
+
+    /// View-level `underline` is macOS 13+; before it, a 1pt rule under the label stands in.
+    @ViewBuilder private var underlinedLabel: some View {
+        if #available(macOS 13, *) {
+            configuration.label
+                .foregroundStyle(palette.alt)
+                .underline(hovering)
+        } else {
+            configuration.label
+                .foregroundStyle(palette.alt)
+                .overlay(alignment: .bottom) { Rectangle().frame(height: 1).opacity(hovering ? 1 : 0) }
+        }
     }
 }
 
@@ -345,10 +460,7 @@ struct HotspotSwitch: View {
             Spacer()
             Button(action: flip) {
                 ZStack(alignment: isOn == true ? .trailing : isOn == false ? .leading : .center) {
-                    Capsule()
-                        .fill((isOn == true ? palette.onTrack : palette.offTrack)
-                            .shadow(.inner(color: .black.opacity(0.45), radius: 4, x: 3, y: 3))
-                            .shadow(.inner(color: palette.highlight, radius: 1.5, x: -1, y: -1)))
+                    Trough(color: isOn == true ? palette.onTrack : palette.offTrack, palette: palette)
                         .frame(width: 46, height: 26)
                     Circle()
                         .fill(LinearGradient(colors: [palette.knobTop, palette.knobBottom],
@@ -361,7 +473,7 @@ struct HotspotSwitch: View {
                         .frame(width: 20, height: 20)
                         .padding(3)
                 }
-                .animation(.snappy(duration: 0.18), value: isOn)
+                .animation(.switchKnob, value: isOn)
             }
             .buttonStyle(.plain)
             .disabled(!enabled)
@@ -432,7 +544,7 @@ private struct WindowControl: View {
             let frame = geometry.frame(in: .global)
             Color.clear
                 .onAppear { WindowButton.frames[help] = frame }
-                .onChange(of: frame) { _, frame in WindowButton.frames[help] = frame }
+                .onChangeCompat(of: frame) { frame in WindowButton.frames[help] = frame }
         })
     }
 }
@@ -473,21 +585,18 @@ struct SecondsField: View {
                 .accessibilityLabel(title)
                 .focused($editing)
                 .onSubmit(commit)
-                .onKeyPress(keys: [.tab, KeyEquivalent("\u{19}")]) { press in
+                .modifier(TextFieldKeys(editing: editing, tab: { back in
                     commit()
-                    focus.move(by: press.key == KeyEquivalent("\u{19}") || press.modifiers.contains(.shift) ? -1 : 1)
-                    return .handled
-                }
-                .onKeyPress(.escape) {
+                    focus.move(by: back ? -1 : 1)
+                }, escape: {
                     draft = seconds
                     focus.current = nil
-                    return .handled
-                }
+                }))
                 .background(GeometryReader { geometry in
                     let frame = geometry.frame(in: .named(KeyboardNavigation.space))
                     Color.clear
                         .onAppear { register(frame) }
-                        .onChange(of: frame) { _, frame in register(frame) }
+                        .onChangeCompat(of: frame) { frame in register(frame) }
                 })
                 .overlay(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -504,9 +613,46 @@ struct SecondsField: View {
             focus.entries[id] = nil
             if focus.current == id { focus.current = nil }
         }
-        .onChange(of: focus.current) { _, current in editing = current == id }
-        .onChange(of: editing) { _, now in
+        .onChangeCompat(of: focus.current) { current in editing = current == id }
+        .onChangeCompat(of: editing) { now in
             if now { focus.current = id } else { commit() }
+        }
+    }
+}
+
+/// Tab/Shift-Tab and Escape for a text field: `onKeyPress` on macOS 14+, a key-down monitor that acts
+/// only while the field is being edited before it.
+private struct TextFieldKeys: ViewModifier {
+    let editing: Bool
+    let tab: (_ back: Bool) -> Void
+    let escape: () -> Void
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if #available(macOS 14, *) {
+            content
+                .onKeyPress(keys: [.tab, KeyEquivalent("\u{19}")]) { press in
+                    tab(press.key == KeyEquivalent("\u{19}") || press.modifiers.contains(.shift))
+                    return .handled
+                }
+                .onKeyPress(.escape) {
+                    escape()
+                    return .handled
+                }
+        } else {
+            content.keyDownMonitor { event in
+                guard editing, event.modifierFlags.isDisjoint(with: [.command, .control, .option]) else { return false }
+                let key = event.charactersIgnoringModifiers ?? ""
+                switch key {
+                case "\t", "\u{19}":
+                    tab(key == "\u{19}" || event.modifierFlags.contains(.shift))
+                    return true
+                case "\u{1b}":
+                    escape()
+                    return true
+                default:
+                    return false
+                }
+            }
         }
     }
 }

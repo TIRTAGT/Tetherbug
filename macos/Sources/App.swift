@@ -49,11 +49,12 @@ final class AgentModel: ObservableObject {
             DispatchQueue.main.async { self.notificationsAllowed = allowed }
         }
     }
-    @Published var loginItem = SMAppService.agent(plistName: "ie.xav.tetherbug.agent.plist").status
+    @Published var loginItem = LoginItemStatus.notRegistered
 
-    private let agent = SMAppService.agent(plistName: "ie.xav.tetherbug.agent.plist")
+    private let agent = makeLoginItem()
 
     init() {
+        loginItem = agent.status
         Thread.detachNewThread { [weak self] in
             while self != nil {
                 // `watch` streams until the agent goes away; then retry, so the window follows restarts.
@@ -125,15 +126,108 @@ final class AgentModel: ObservableObject {
         }
         loginItem = agent.status
         // macOS asks the user to allow new background items in System Settings first.
-        if loginItem == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
+        if loginItem == .requiresApproval { agent.openApprovalSettings() }
     }
+}
+
+/// The states of the "Run in the background" login item, as SMAppService reports them.
+enum LoginItemStatus { case notRegistered, enabled, requiresApproval, notFound }
+
+/// The login item that runs the agent: SMAppService on macOS 13+, a LaunchAgent plist before.
+protocol LoginItem {
+    var status: LoginItemStatus { get }
+    func register() throws
+    func unregister() throws
+    /// Shows where the user allows a login item that requires approval.
+    func openApprovalSettings()
+}
+
+func makeLoginItem() -> any LoginItem {
+    if #available(macOS 13, *) { return ServiceLoginItem() }
+    return LaunchAgentLoginItem()
+}
+
+@available(macOS 13, *)
+private struct ServiceLoginItem: LoginItem {
+    private let service = SMAppService.agent(plistName: "ie.xav.tetherbug.agent.plist")
+
+    var status: LoginItemStatus {
+        switch service.status {
+        case .notRegistered: return .notRegistered
+        case .enabled: return .enabled
+        case .requiresApproval: return .requiresApproval
+        case .notFound: return .notFound
+        @unknown default: return .notRegistered
+        }
+    }
+
+    func register() throws { try service.register() }
+    func unregister() throws { try service.unregister() }
+    func openApprovalSettings() { SMAppService.openSystemSettingsLoginItems() }
+}
+
+/// macOS 12, which has no SMAppService: a plist in ~/Library/LaunchAgents that runs this copy of the
+/// app's agent, loaded into the user's launchd domain. Same label as the bundled one, so the agent
+/// still counts as the app's own login item (see `AgentState.managedBy`).
+private struct LaunchAgentLoginItem: LoginItem {
+    private static let label = "ie.xav.tetherbug.agent"
+
+    private var plist: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents/\(Self.label).plist")
+    }
+
+    var status: LoginItemStatus { FileManager.default.fileExists(atPath: plist.path) ? .enabled : .notRegistered }
+
+    func register() throws {
+        guard let executable = Bundle.main.executablePath else { throw LoginItemError("no executable path") }
+        let job: [String: Any] = [
+            "Label": Self.label,
+            "ProgramArguments": [executable, "agent"],
+            "RunAtLoad": true,
+            "KeepAlive": ["SuccessfulExit": false],
+        ]
+        try FileManager.default.createDirectory(at: plist.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try PropertyListSerialization.data(fromPropertyList: job, format: .xml, options: 0).write(to: plist, options: .atomic)
+        // Replace a job loaded from an older plist (the app may have moved), then start this one now.
+        launchctl("bootout", "gui/\(getuid())/\(Self.label)")
+        guard launchctl("bootstrap", "gui/\(getuid())", plist.path) == 0 else { throw LoginItemError("launchctl bootstrap failed") }
+    }
+
+    func unregister() throws {
+        launchctl("bootout", "gui/\(getuid())/\(Self.label)")
+        if FileManager.default.fileExists(atPath: plist.path) { try FileManager.default.removeItem(at: plist) }
+    }
+
+    func openApprovalSettings() {}
+
+    /// Runs launchctl and returns its exit status (-1 if it couldn't start).
+    @discardableResult
+    private func launchctl(_ arguments: String...) -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = arguments
+        do { try process.run() } catch { return -1 }
+        process.waitUntilExit()
+        return process.terminationStatus
+    }
+}
+
+struct LoginItemError: LocalizedError {
+    let errorDescription: String?
+    init(_ description: String) { errorDescription = description }
 }
 
 enum Links {
     static let repo = URL(string: "https://github.com/xav-ie/Tetherbug")!
     static let setup = URL(string: "https://github.com/xav-ie/Tetherbug/blob/main/docs/macos.md")!
     static let pairing = URL(string: "https://github.com/xav-ie/Tetherbug/blob/main/docs/macos.md#2-pair-the-phone-with-your-mac")!
-    static let notificationSettings = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=ie.xav.tetherbug")!
+    static var notificationSettings: URL {
+        if #available(macOS 13, *) {
+            return URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=ie.xav.tetherbug")!
+        }
+        // System Preferences' Notifications pane, before System Settings.
+        return URL(string: "x-apple.systempreferences:com.apple.preference.notifications")!
+    }
     static let bluetoothSettings = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth")!
     static let sketchybar = URL(string: "https://github.com/xav-ie/Tetherbug/blob/main/docs/sketchybar.md")!
     static let releases = URL(string: "https://github.com/xav-ie/Tetherbug/releases")!
@@ -206,7 +300,7 @@ struct ContentView: View {
 
             HStack(spacing: 16) {
                 SiteLink(title: "Setup guide", url: Links.setup, palette: palette) { Image(systemName: "book.closed") }
-                SiteLink(title: "Phone app", url: Links.releases, palette: palette) { Image(systemName: "smartphone") }
+                SiteLink(title: "Phone app", url: Links.releases, palette: palette) { Image(systemName: Self.phoneSymbol) }
                 SiteLink(title: "GitHub", url: Links.repo, palette: palette) {
                     PathShape.github.fill(style: FillStyle(eoFill: true)).frame(width: 13, height: 13)
                 }
@@ -227,6 +321,12 @@ struct ContentView: View {
         .background(WindowSurface(palette: palette))
         .clipShape(RoundedRectangle(cornerRadius: WindowSurface.radius, style: .continuous))
         .keyboardNavigation(keyboard)
+    }
+
+    /// "smartphone" may be missing from macOS 12's SF Symbols; "iphone" is there.
+    private static var phoneSymbol: String {
+        if #available(macOS 13, *) { return "smartphone" }
+        return "iphone"
     }
 
     @ViewBuilder private func status(_ palette: Palette) -> some View {
@@ -379,7 +479,7 @@ struct PasswordRow: View {
             .disabled(!available)
             .opacity(available ? 1 : 0.4)
         }
-        .onChange(of: available) { if !available { shown = false } }
+        .onChangeCompat(of: available) { available in if !available { shown = false } }
     }
 }
 
@@ -471,7 +571,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.isMovableByWindowBackground = false
         NSApp.mainMenu = mainMenu()
         let hosting = NSHostingView(rootView: ContentView(model: model))
-        hosting.safeAreaRegions = []
+        if #available(macOS 13.3, *) { hosting.safeAreaRegions = [] }
         window.contentView = hosting
         window.setContentSize(window.contentView!.fittingSize)
         window.center()
