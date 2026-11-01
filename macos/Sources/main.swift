@@ -68,6 +68,8 @@ case "debug":
     if Settings.debugNotifications {
         print(notificationPermissionGranted() ? "notifications allowed" : "notifications not allowed: turn them on in System Settings → Notifications → Tetherbug")
     }
+case "scan": // internal: list nearby Bluetooth LE devices, for diagnosing discovery
+    BLEScanner(seconds: args.dropFirst().first.flatMap(TimeInterval.init) ?? 30).run()
 case "render-icon": // internal: build.sh renders the app icon with this
     renderIcon(to: args.dropFirst().first ?? "AppIcon.icns")
 case "-h", "--help", "help":
