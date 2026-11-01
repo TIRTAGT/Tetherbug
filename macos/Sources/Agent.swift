@@ -97,24 +97,29 @@ final class Agent: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         state.bluetooth = ["unknown", "resetting", "unsupported", "unauthorized", "off", "on"][min(central.state.rawValue, 5)]
+        note("bluetooth \(state.bluetooth)")
         guard central.state == .poweredOn else {
             state.connected = false
             return
         }
         // A bonded phone may already be connected at the system level; otherwise scan for it.
         if let known = central.retrieveConnectedPeripherals(withServices: [Gatt.service]).first {
+            note("phone already connected to the system: \(known.name ?? "unnamed") \(known.identifier)")
             connect(known)
         } else {
+            note("scanning for the phone")
             central.scanForPeripherals(withServices: [Gatt.service])
         }
     }
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi: NSNumber) {
+        note("found \(peripheral.name ?? "unnamed") \(peripheral.identifier) at \(rssi) dBm")
         central.stopScan()
         connect(peripheral)
     }
 
     private func connect(_ peripheral: CBPeripheral) {
+        note("connecting to \(peripheral.name ?? "unnamed")")
         phone = peripheral
         peripheral.delegate = self
         state.phone = peripheral.name
