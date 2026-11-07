@@ -135,6 +135,7 @@ final class Agent: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         note("connected to \(peripheral.name ?? "phone")")
+        central.stopScan()
         state.connected = true
         peripheral.discoverServices([Gatt.service])
     }
@@ -144,13 +145,20 @@ final class Agent: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         state.connected = false
         command = nil
         credentials = nil
-        // A pending connect has no timeout: the link comes back as soon as the phone is in range.
-        central.connect(peripheral)
+        reconnect(peripheral)
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         note("connect failed: \(error?.localizedDescription ?? "unknown")")
+        reconnect(peripheral)
+    }
+
+    /// A pending connect has no timeout: the link comes back as soon as the phone is in range. But a
+    /// Bluetooth 4.0 controller can't resolve the phone's new random address after it restarts, so
+    /// the pending connect never fires there; scan as well, and connect to whichever finds it first.
+    private func reconnect(_ peripheral: CBPeripheral) {
         central.connect(peripheral)
+        central.scanForPeripherals(withServices: [Gatt.service])
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
