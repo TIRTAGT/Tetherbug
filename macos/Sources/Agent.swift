@@ -16,6 +16,7 @@ final class Agent: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     private let wifi = NWPathMonitor(requiredInterfaceType: .wifi)
     private let scanQueue = DispatchQueue(label: "ie.xav.tetherbug.scan")
     private var offlineSince: Date?
+    private var wifiPoweredOn: Bool? // as of the last wifiChanged; nil until the first path update
     private var backoff: TimeInterval = 2
     private var nextRetry = Date.distantPast
     private var pendingFullScan: DispatchWorkItem? // the full-scan fallback while the frequency is unknown
@@ -59,6 +60,7 @@ final class Agent: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     private func wifiChanged(_ path: NWPath) {
         let poweredOn = CWWiFiClient.shared().interface()?.powerOn() ?? false
+        wifiPoweredOn = poweredOn
         let offline = poweredOn && path.status != .satisfied
         if offline != state.wifiOffline { note(offline ? "Wi-Fi lost" : "Wi-Fi connected") }
         state.wifiOffline = offline
@@ -75,6 +77,11 @@ final class Agent: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     private func tick() {
+        // Turning Wi-Fi back on without joining a network leaves the path unsatisfied, so the path
+        // monitor reports nothing; catch the power change here instead.
+        if let known = wifiPoweredOn, known != (CWWiFiClient.shared().interface()?.powerOn() ?? false) {
+            return wifiChanged(wifi.currentPath)
+        }
         guard Settings.onNoWifi, offlineSince != nil, Date() >= nextRetry else { return }
         let hotspot = state.status?.hotspot
         guard hotspot != .on, hotspot != .starting else { return }
